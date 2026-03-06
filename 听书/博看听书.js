@@ -214,6 +214,89 @@ async function fetchAllAlbumUnits(albumId) {
 }
 
 /**
+ * 获取专辑详情信息
+ * @param {string} albumId 专辑 ID
+ * @returns {Promise<{success:boolean,data:Object|null}>}
+ */
+async function fetchAlbumInfo(albumId) {
+  try {
+    const url = buildURL(`${API_HOST}/voice/album/get`, {
+      album_id: albumId,
+    });
+    const data = await requestJSON(url);
+    const album = data?.data;
+    if (!album || typeof album !== "object") {
+      return { success: false, data: null };
+    }
+
+    return {
+      success: true,
+      data: {
+        vod_name: String(album.title || album.name || "未知标题"),
+        vod_pic: String(album.cover || ""),
+        vod_author: String(album.author || ""),
+        vod_desc: String(album.description || "暂无简介"),
+        created_at: String(album.created_at || ""),
+        updated_at: String(album.updated_at || ""),
+      },
+    };
+  } catch (error) {
+    logError(`获取专辑信息失败 ${albumId}`, error);
+    return { success: false, data: null };
+  }
+}
+
+/**
+ * 从分类列表中定位专辑信息（用于修正详情标题）
+ * @param {string} albumId 专辑 ID
+ * @returns {Promise<{vod_name:string,vod_pic:string,vod_author:string,found:boolean}>}
+ */
+async function findAlbumFromCategories(albumId) {
+  const classes = Array.isArray(CATEGORY_CONFIG.class) ? CATEGORY_CONFIG.class : [];
+  const maxPages = 5;
+  const perPage = 24;
+
+  const result = {
+    vod_name: "",
+    vod_pic: "",
+    vod_author: "",
+    found: false,
+  };
+
+  for (const cls of classes) {
+    let page = 1;
+    let hasMore = true;
+
+    while (hasMore && page <= maxPages && !result.found) {
+      const books = await fetchCategoryBooks(cls.type_id, page, perPage);
+      if (!Array.isArray(books) || books.length === 0) {
+        break;
+      }
+
+      const hit = books.find((item) => String(item?.id || "") === albumId);
+      if (hit) {
+        result.vod_name = String(hit.name || hit.title || "");
+        result.vod_pic = String(hit.cover || "");
+        result.vod_author = String(hit.author || "");
+        result.found = true;
+        break;
+      }
+
+      if (books.length < perPage) {
+        hasMore = false;
+      }
+      page += 1;
+    }
+
+    if (result.found) {
+      break;
+    }
+  }
+
+  return result;
+}
+
+/**
  * 对分类数组按 forceOrder 排序
  * @param {Array} classes 分类数组
  * @returns {Array}
@@ -375,6 +458,8 @@ async function detail(params) {
       throw new Error("视频ID不能为空");
     }
 
+    const categoryInfo = await findAlbumFromCategories(videoId);
+    const albumInfo = await fetchAlbumInfo(videoId);
     const units = await fetchAllAlbumUnits(videoId);
     if (!Array.isArray(units) || units.length === 0) {
       return { list: [] };
@@ -405,15 +490,49 @@ async function detail(params) {
         ]
       : [];
 
-    const createdAt = String(first?.created_at || "");
-    const updatedAt = String(first?.updated_at || "");
+    let vodName = "未知标题";
+    if (categoryInfo.found && categoryInfo.vod_name) {
+      vodName = categoryInfo.vod_name;
+    } else if (albumInfo.success && albumInfo.data?.vod_name) {
+      vodName = albumInfo.data.vod_name;
+    } else if (first?.album_title) {
+      vodName = String(first.album_title);
+    } else if (first?.title) {
+      vodName = String(first.title);
+    }
+
+    let vodPic = "";
+    if (categoryInfo.found && categoryInfo.vod_pic) {
+      vodPic = categoryInfo.vod_pic;
+    } else if (albumInfo.success && albumInfo.data?.vod_pic) {
+      vodPic = albumInfo.data.vod_pic;
+    } else if (first?.cover) {
+      vodPic = String(first.cover);
+    }
+
+    let vodAuthor = "";
+    if (categoryInfo.found && categoryInfo.vod_author) {
+      vodAuthor = categoryInfo.vod_author;
+    } else if (albumInfo.success && albumInfo.data?.vod_author) {
+      vodAuthor = albumInfo.data.vod_author;
+    }
+
+    const createdAt = albumInfo.success
+      ? String(albumInfo.data?.created_at || "")
+      : String(first?.created_at || "");
+    const updatedAt = albumInfo.success
+      ? String(albumInfo.data?.updated_at || "")
+      : String(first?.updated_at || "");
+    const albumDesc = albumInfo.success
+      ? String(albumInfo.data?.vod_desc || "暂无简介")
+      : String(first?.description || "暂无简介");
 
     const detailItem = {
       vod_id: videoId,
-      vod_name: String(first?.title || "未知标题"),
-      vod_pic: String(first?.cover || ""),
-      vod_remarks: `共${episodes.length}集`,
-      vod_content: String(first?.description || "暂无简介"),
+      vod_name: vodName,
+      vod_pic: vodPic,
+      vod_remarks: `${vodAuthor ? `${vodAuthor} ` : ""}共${episodes.length}集`,
+      vod_content: albumDesc,
       vod_actor: createdAt ? `▶️创建于 ${createdAt}` : "",
       vod_director: updatedAt ? `▶️更新于 ${updatedAt}` : "",
       vod_year: createdAt ? `${createdAt.split("-")[0]}年` : "",
